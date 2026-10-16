@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "160828722621",
+    "project_id": "cong-pulse",
+    "storage_bucket": "cong-pulse.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:160828722621:android:f5e7c6e69f29d255c596d4",
+        "android_client_info": {
+          "package_name": "com.example.cng_pulse"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAu3oGuzX9Afk3-hxMwMLPZULaok96Jr3o"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

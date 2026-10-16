@@ -1,0 +1,1 @@
+# CNGPulse AI service\n\nOptional small service for waiting-time prediction and best-time recommendation.\n
