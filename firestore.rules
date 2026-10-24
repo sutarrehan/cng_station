@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function self(uid) { return signedIn() && request.auth.uid == uid; }
+    function userDocExists() {
+      return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    function isAdmin() {
+      return userDocExists() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.accountStatus != 'disabled';
+    }
+    function onlyChanged(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
+    }
+
+    match /users/{uid} {
+      allow read: if self(uid) || isAdmin();
+      allow create: if self(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.role == 'customer'
+        && request.resource.data.accountStatus == 'active';
+      allow update: if (self(uid) && onlyChanged(['name', 'phone', 'photoUrl', 'updatedAt'])) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /stations/{stationId} {
+      allow read: if signedIn();
+      allow create: if isAdmin()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.name is string
+        && request.resource.data.address is string;
+      allow update: if isAdmin()
+        && resource.data.ownerId == request.auth.uid
+        && request.resource.data.ownerId == resource.data.ownerId;
+      allow delete: if isAdmin() && resource.data.ownerId == request.auth.uid;
+    }
+
+    match /tokens/{tokenId} {
+      allow read: if signedIn() && (resource.data.customerId == request.auth.uid || isAdmin());
+      allow create: if signedIn()
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.status == 'waiting'
+        && request.resource.data.stationId is string
+        && request.resource.data.createdAt == request.time;
+      allow update: if isAdmin() || (signedIn()
+        && resource.data.customerId == request.auth.uid
+        && resource.data.status == 'waiting'
+        && request.resource.data.status == 'cancelled'
+        && onlyChanged(['status', 'updatedAt']));
+      allow delete: if isAdmin();
+    }
+
+    match /complaints/{complaintId} {
+      allow create: if signedIn()
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.status == 'open'
+        && request.resource.data.description is string;
+      allow read: if isAdmin() || (signedIn() && resource.data.customerId == request.auth.uid);
+      allow update, delete: if isAdmin();
+    }
+
+    match /vehicles/{vehicleId} {
+      allow read: if signedIn() && (resource.data.customerId == request.auth.uid || isAdmin());
+      allow create: if signedIn() && request.resource.data.customerId == request.auth.uid;
+      allow update, delete: if isAdmin() || (signedIn() && resource.data.customerId == request.auth.uid
+        && request.resource.data.customerId == resource.data.customerId);
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}
