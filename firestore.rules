@@ -1,0 +1,375 @@
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================
+    // COMMON HELPERS
+    // =========================
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function self(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function userExists(uid) {
+      return exists(
+        /databases/$(database)/documents/users/$(uid)
+      );
+    }
+
+    function roleOf(uid) {
+      return get(
+        /databases/$(database)/documents/users/$(uid)
+      ).data.role;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && userExists(request.auth.uid)
+        && roleOf(request.auth.uid) == 'admin'
+        && get(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        ).data.accountStatus == 'active';
+    }
+
+    function isPumpOwner() {
+      return signedIn()
+        && userExists(request.auth.uid)
+        && roleOf(request.auth.uid) == 'pumpOwner'
+        && get(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        ).data.accountStatus == 'active'
+        && get(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        ).data.ownerApplicationStatus == 'approved';
+    }
+
+    function onlyChanged(fields) {
+      return request.resource.data
+        .diff(resource.data)
+        .affectedKeys()
+        .hasOnly(fields);
+    }
+
+    // =========================
+    // USERS
+    // =========================
+
+    match /users/{uid} {
+      allow read: if self(uid) || isAdmin();
+
+      allow create: if self(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.role == 'customer'
+        && request.resource.data.accountStatus == 'active'
+        && request.resource.data.ownerApplicationStatus
+          in ['none', 'pending'];
+
+      allow update: if (
+        self(uid)
+        && onlyChanged([
+          'name',
+          'phone',
+          'photoUrl',
+          'updatedAt',
+          'vehicle',
+          'fcmTokens',
+          'notificationUpdatedAt'
+        ])
+      ) || (
+        isAdmin()
+        && onlyChanged([
+          'role',
+          'accountStatus',
+          'ownerApplicationStatus',
+          'updatedAt'
+        ])
+        && request.resource.data.role
+          in ['customer', 'pumpOwner']
+        && request.resource.data.accountStatus
+          in ['active', 'disabled']
+        && request.resource.data.ownerApplicationStatus
+          in ['none', 'pending', 'approved', 'rejected']
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // =========================
+    // PUMP OWNER APPLICATIONS
+    // =========================
+
+    match /pumpOwnerApplications/{uid} {
+      allow create: if self(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.stationName is string
+        && request.resource.data.stationAddress is string;
+
+      allow read: if self(uid) || isAdmin();
+
+      allow update: if isAdmin()
+        && resource.data.status == 'pending'
+        && request.resource.data.status
+          in ['approved', 'rejected']
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.stationName
+          == resource.data.stationName
+        && request.resource.data.stationAddress
+          == resource.data.stationAddress
+        && onlyChanged([
+          'status',
+          'reviewNote',
+          'reviewedBy',
+          'reviewedAt',
+          'updatedAt'
+        ])
+        && request.resource.data.reviewedBy
+          == request.auth.uid
+        && (
+          (
+            request.resource.data.status == 'approved'
+            && request.resource.data.reviewNote == ''
+          )
+          ||
+          (
+            request.resource.data.status == 'rejected'
+            && request.resource.data.reviewNote is string
+            && request.resource.data.reviewNote.size() > 0
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // =========================
+    // STATIONS
+    // =========================
+
+    match /stations/{stationId} {
+      allow read: if signedIn();
+
+      allow create: if (isPumpOwner() || isAdmin())
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.name is string
+        && request.resource.data.address is string
+        && request.resource.data.active is bool;
+
+      allow update: if isAdmin()
+        || (
+          isPumpOwner()
+          && resource.data.ownerId == request.auth.uid
+          && request.resource.data.ownerId == resource.data.ownerId
+          && onlyChanged([
+            'name',
+            'address',
+            'pricePerKg',
+            'queueCount',
+            'availability',
+            'active',
+            'updatedAt'
+          ])
+        );
+
+      allow delete: if isAdmin()
+        && resource.data.ownerId == request.auth.uid;
+    }
+
+    // =========================
+    // TOKENS / QUEUE
+    // =========================
+
+    match /tokens/{tokenId} {
+      allow read: if signedIn()
+        && (
+          resource.data.customerId == request.auth.uid
+          || isAdmin()
+          || (
+            isPumpOwner()
+            && resource.data.stationOwnerId == request.auth.uid
+          )
+        );
+
+      allow create: if signedIn()
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.status == 'waiting'
+        && request.resource.data.stationId is string
+        && request.resource.data.tokenNumber is int
+        && request.resource.data.queuePosition is int
+        && request.resource.data.createdAt == request.time;
+
+      // Admins can manage tokens. Pump owners may only update status
+      // fields on tokens belonging to their own station; they cannot alter
+      // customer, station, token number, or queue position fields.
+      allow update: if isAdmin()
+        || (
+          isPumpOwner()
+          && resource.data.stationOwnerId == request.auth.uid
+          && request.resource.data.stationOwnerId == resource.data.stationOwnerId
+          && request.resource.data.customerId == resource.data.customerId
+          && request.resource.data.stationId == resource.data.stationId
+          && request.resource.data.tokenNumber == resource.data.tokenNumber
+          && request.resource.data.queuePosition == resource.data.queuePosition
+          && request.resource.data.status in [
+            'waiting', 'called', 'serving', 'completed', 'cancelled'
+          ]
+          && onlyChanged(['status', 'updatedAt'])
+        )
+        || (
+          signedIn()
+          && resource.data.customerId == request.auth.uid
+          && resource.data.status == 'waiting'
+          && request.resource.data.status == 'cancelled'
+          && onlyChanged(['status', 'updatedAt'])
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    // =========================
+    // COMPLAINTS
+    // =========================
+
+    match /complaints/{complaintId} {
+      allow create: if signedIn()
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.status == 'open'
+        && request.resource.data.description is string;
+
+      allow read: if isAdmin()
+        || (
+          signedIn()
+          && resource.data.customerId == request.auth.uid
+        );
+
+      allow update, delete: if isAdmin();
+    }
+
+    // =========================
+    // VEHICLES
+    // =========================
+
+    match /vehicles/{vehicleId} {
+      allow read: if signedIn()
+        && (
+          resource.data.customerId == request.auth.uid
+          || isAdmin()
+        );
+
+      allow create: if signedIn()
+        && request.resource.data.customerId == request.auth.uid;
+
+      allow update, delete: if isAdmin()
+        || (
+          signedIn()
+          && resource.data.customerId == request.auth.uid
+          && request.resource.data.customerId == resource.data.customerId
+        );
+    }
+
+    // =========================
+    // STATION TOKEN COUNTERS
+    // =========================
+
+    match /stationCounters/{stationId} {
+      // Authenticated customers can read a specific counter.
+      allow get: if signedIn();
+
+      // Clients cannot list all counter documents.
+      allow list: if false;
+
+      // Initialize a new station counter at token 1.
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+          'stationId',
+          'lastTokenNumber',
+          'updatedAt'
+        ])
+        && request.resource.data.stationId == stationId
+        && request.resource.data.lastTokenNumber == 1;
+
+      // Only permit incrementing the counter by one.
+      allow update: if signedIn()
+        && request.resource.data.keys().hasOnly([
+          'stationId',
+          'lastTokenNumber',
+          'updatedAt'
+        ])
+        && request.resource.data.stationId == stationId
+        && request.resource.data.lastTokenNumber
+          == resource.data.lastTokenNumber + 1
+        && request.resource.data.diff(resource.data)
+          .affectedKeys()
+          .hasOnly(['lastTokenNumber', 'updatedAt']);
+
+      allow delete: if isAdmin();
+    }
+
+    // =========================
+    // REFUELING LOGS
+    // =========================
+
+    match /refuelingLogs/{recordId} {
+      allow create: if signedIn()
+        && request.resource.data.customerId == request.auth.uid;
+
+      allow read, update, delete: if signedIn()
+        && resource.data.customerId == request.auth.uid;
+    }
+
+    // =========================
+    // FUEL REMINDERS
+    // =========================
+
+    match /fuelReminders/{reminderId} {
+      allow create: if signedIn()
+        && request.resource.data.customerId == request.auth.uid;
+
+      allow read, update, delete: if signedIn()
+        && resource.data.customerId == request.auth.uid;
+    }
+
+    // =========================
+    // REVIEWS
+    // =========================
+
+    match /reviews/{reviewId} {
+      allow create: if signedIn()
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.rating is int
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5
+        && request.resource.data.stationId is string;
+
+      allow read: if signedIn();
+
+      allow update, delete: if isAdmin()
+        || (
+          signedIn()
+          && resource.data.customerId == request.auth.uid
+        );
+    }
+
+    // =========================
+    // OFFERS
+    // =========================
+
+    match /offers/{offerId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // =========================
+    // DENY EVERYTHING ELSE
+    // =========================
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
